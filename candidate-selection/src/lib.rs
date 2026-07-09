@@ -9,10 +9,12 @@ pub use crate::num::Normalized;
 
 pub trait Candidate {
     type Id: Eq + Ord;
+    /// Context passed to scoring, allowing callers to parameterize the scoring curves.
+    type Ctx;
     fn id(&self) -> Self::Id;
     fn fee(&self) -> Normalized;
-    fn score(&self) -> Normalized;
-    fn score_many<const LIMIT: usize>(candidates: &[&Self]) -> Normalized;
+    fn score(&self, ctx: &Self::Ctx) -> Normalized;
+    fn score_many<const LIMIT: usize>(candidates: &[&Self], ctx: &Self::Ctx) -> Normalized;
 }
 
 /// Select up to `LIMIT` of the provided candidates.
@@ -21,6 +23,7 @@ pub trait Candidate {
 /// individual score greater than 0.
 pub fn select<'c, Candidate, const LIMIT: usize>(
     candidates: &'c [Candidate],
+    ctx: &Candidate::Ctx,
 ) -> ArrayVec<&'c Candidate, LIMIT>
 where
     Candidate: crate::Candidate,
@@ -31,11 +34,11 @@ where
                           selected: &ArrayVec<&'c Candidate, LIMIT>,
                           candidate: &'c Candidate| {
         let potential_score = if selected.is_empty() {
-            Candidate::score(candidate)
+            Candidate::score(candidate, ctx)
         } else {
             let mut buf = selected.clone();
             buf.push(candidate);
-            Candidate::score_many::<LIMIT>(&buf)
+            Candidate::score_many::<LIMIT>(&buf, ctx)
         };
         NotNan::new(potential_score.as_f64() - current_score.as_f64()).unwrap()
     };
@@ -44,8 +47,8 @@ where
     while selected.len() < LIMIT {
         let current_score = match selected.len() {
             0 => Normalized::ZERO,
-            1 => Candidate::score(selected[0]),
-            _ => Candidate::score_many::<LIMIT>(&selected),
+            1 => Candidate::score(selected[0], ctx),
+            _ => Candidate::score_many::<LIMIT>(&selected, ctx),
         };
         let selection = candidates
             .iter()

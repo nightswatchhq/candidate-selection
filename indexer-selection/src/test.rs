@@ -1,7 +1,7 @@
 use std::ops::RangeInclusive;
 
 use candidate_selection::{num::assert_within, Candidate as _};
-use proptest::{prop_assert, prop_compose, proptest};
+use proptest::{prop_assert, prop_assert_eq, prop_compose, proptest};
 
 use crate::*;
 
@@ -10,7 +10,11 @@ mod limits {
 
     #[test]
     fn success_rate() {
-        assert_within(score_success_rate(Normalized::ZERO).as_f64(), 1e-8, 0.001);
+        assert_within(
+            score_success_rate(Normalized::ZERO, &SuccessRateWeights::default()).as_f64(),
+            1e-8,
+            0.001,
+        );
     }
 }
 
@@ -63,12 +67,12 @@ prop_compose! {
 proptest! {
     #[test]
     fn select(candidates in candidates(1..=5)) {
-        println!("scores: {:#?}", candidates.iter().map(|c| (c.id, c.score())).collect::<Vec<_>>());
+        println!("scores: {:#?}", candidates.iter().map(|c| (c.id, c.score(&Weights::default()))).collect::<Vec<_>>());
         let selections: ArrayVec<&Candidate<u64, ()>, 3> = crate::select(&candidates);
         println!("selections: {:#?}", selections.iter().map(|c| c.id).collect::<Vec<_>>());
 
         let valid_candidate = |c: &Candidate<u64, ()>| -> bool {
-            c.score() != Normalized::ZERO
+            c.score(&Weights::default()) != Normalized::ZERO
         };
         let valid_selections = candidates.iter().filter(|c| valid_candidate(c)).count();
 
@@ -108,9 +112,9 @@ fn sensitivity_seconds_behind() {
         },
     ];
 
-    println!("score {} {:?}", candidates[0].id, candidates[0].score(),);
-    println!("score {} {:?}", candidates[1].id, candidates[1].score(),);
-    assert!(candidates[0].score() <= candidates[1].score());
+    println!("score {} {:?}", candidates[0].id, candidates[0].score(&Weights::default()),);
+    println!("score {} {:?}", candidates[1].id, candidates[1].score(&Weights::default()),);
+    assert!(candidates[0].score(&Weights::default()) <= candidates[1].score(&Weights::default()));
 
     let selections: ArrayVec<&Candidate<u64, ()>, 3> = crate::select(&candidates);
     assert_eq!(1, selections.len(), "select exactly one candidate");
@@ -148,9 +152,9 @@ fn sensitivity_seconds_behind_vs_latency() {
         },
     ];
 
-    println!("score {} {:?}", candidates[0].id, candidates[0].score(),);
-    println!("score {} {:?}", candidates[1].id, candidates[1].score(),);
-    assert!(candidates[0].score() <= candidates[1].score());
+    println!("score {} {:?}", candidates[0].id, candidates[0].score(&Weights::default()),);
+    println!("score {} {:?}", candidates[1].id, candidates[1].score(&Weights::default()),);
+    assert!(candidates[0].score(&Weights::default()) <= candidates[1].score(&Weights::default()));
 
     let selections: ArrayVec<&Candidate<u64, ()>, 3> = crate::select(&candidates);
     assert_eq!(1, selections.len(), "select exactly one candidate");
@@ -200,14 +204,15 @@ fn multi_selection_preference() {
     ];
 
     for c in &candidates {
-        println!("{} {:?}", c.id, c.score());
+        println!("{} {:?}", c.id, c.score(&Weights::default()));
     }
     let combined_score = Candidate::score_many::<3>(
         &candidates
             .iter()
             .collect::<ArrayVec<&Candidate<u64, ()>, 3>>(),
+        &Weights::default(),
     );
-    assert!(candidates.iter().all(|c| c.score() < combined_score));
+    assert!(candidates.iter().all(|c| c.score(&Weights::default()) < combined_score));
 
     let selected: ArrayVec<&Candidate<u64, ()>, 3> = crate::select(&candidates);
     println!("{:#?}", selected);
@@ -253,14 +258,15 @@ fn low_volume_response() {
     ];
 
     for c in &candidates {
-        println!("{} {:?}", c.id, c.score());
+        println!("{} {:?}", c.id, c.score(&Weights::default()));
     }
     let combined_score = Candidate::score_many::<3>(
         &candidates
             .iter()
             .collect::<ArrayVec<&Candidate<u64, ()>, 3>>(),
+        &Weights::default(),
     );
-    assert!(candidates.iter().all(|c| c.score() < combined_score));
+    assert!(candidates.iter().all(|c| c.score(&Weights::default()) < combined_score));
 
     let selected: ArrayVec<&Candidate<u64, ()>, 3> = crate::select(&candidates);
     println!("{:#?}", selected);
@@ -288,7 +294,7 @@ fn perf_decay() {
             perf.decay();
         }
         candidate.perf = perf.expected_performance();
-        candidate.score()
+        candidate.score(&Weights::default())
     };
 
     let s0 = simulate(120, true, 200).as_f64();
@@ -300,4 +306,17 @@ fn perf_decay() {
     assert!(s1 < (s0 * 0.8));
     assert!(s2 < (s0 * 0.1));
     assert!(s3 > (s0 * 0.5));
+}
+
+proptest! {
+    /// `select_with_weights` with default weights must be identical to `select`.
+    #[test]
+    fn default_weights_match_select(candidates in candidates(1..=5)) {
+        let a: ArrayVec<&Candidate<u64, ()>, 3> = crate::select(&candidates);
+        let b: ArrayVec<&Candidate<u64, ()>, 3> =
+            crate::select_with_weights(&candidates, &Weights::default());
+        let ids_a: Vec<u64> = a.iter().map(|c| c.id).collect();
+        let ids_b: Vec<u64> = b.iter().map(|c| c.id).collect();
+        prop_assert_eq!(ids_a, ids_b);
+    }
 }

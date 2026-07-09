@@ -11,16 +11,17 @@ struct TestCandidate {
 
 impl Candidate for TestCandidate {
     type Id = u8;
+    type Ctx = ();
     fn id(&self) -> Self::Id {
         self.id
     }
     fn fee(&self) -> Normalized {
         self.fee
     }
-    fn score(&self) -> Normalized {
+    fn score(&self, _ctx: &()) -> Normalized {
         self.score
     }
-    fn score_many<const LIMIT: usize>(candidates: &[&Self]) -> Normalized {
+    fn score_many<const LIMIT: usize>(candidates: &[&Self], _ctx: &()) -> Normalized {
         let mut combined_score = 0.0;
         for candidate in candidates {
             combined_score = (combined_score + candidate.score.as_f64()).min(1.0);
@@ -46,11 +47,11 @@ proptest! {
     ) {
         let exists_acceptable_candidate = candidates.iter().any(|c| c.score > Normalized::ZERO);
 
-        let selections: ArrayVec<&TestCandidate, 1> = select(&candidates);
+        let selections: ArrayVec<&TestCandidate, 1> = select(&candidates, &());
         prop_assert_eq!(exists_acceptable_candidate, !selections.is_empty());
         prop_assert_eq!(true, selections.iter().all(|s| s.score > Normalized::ZERO));
 
-        let selections: ArrayVec<&TestCandidate, 3> = select(&candidates);
+        let selections: ArrayVec<&TestCandidate, 3> = select(&candidates, &());
         prop_assert_eq!(true, selections.iter().all(|s| s.score > Normalized::ZERO));
         prop_assert_eq!(exists_acceptable_candidate, !selections.is_empty());
     }

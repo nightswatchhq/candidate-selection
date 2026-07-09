@@ -6,6 +6,8 @@ edition = "2021"
 [dependencies]
 candidate-selection = { path = "../candidate-selection" }
 permutation = "0.4.1"
+serde = { version = "1.0", features = ["derive"] }
 
 [dev-dependencies]
 proptest = "1.4.0"
+serde_json = "1.0"

@@ -2,8 +2,10 @@ use std::{collections::hash_map::DefaultHasher, f64::consts::E, hash::Hasher as 
 
 pub use candidate_selection::{ArrayVec, Normalized};
 pub use performance::*;
+pub use weights::*;
 
 mod performance;
+mod weights;
 #[cfg(test)]
 mod test;
 
@@ -30,7 +32,18 @@ pub fn select<I, D, const LIMIT: usize>(
 where
     I: std::hash::Hash,
 {
-    candidate_selection::select(candidates)
+    candidate_selection::select(candidates, &Weights::default())
+}
+
+/// Like [`select`], but using caller-provided scoring [`Weights`] instead of the defaults.
+pub fn select_with_weights<'c, I, D, const LIMIT: usize>(
+    candidates: &'c [Candidate<I, D>],
+    weights: &Weights,
+) -> ArrayVec<&'c Candidate<I, D>, LIMIT>
+where
+    I: std::hash::Hash,
+{
+    candidate_selection::select(candidates, weights)
 }
 
 impl<I, D> candidate_selection::Candidate for Candidate<I, D>
@@ -38,6 +51,7 @@ where
     I: std::hash::Hash,
 {
     type Id = u64;
+    type Ctx = Weights;
 
     fn id(&self) -> Self::Id {
         let mut hasher = DefaultHasher::new();
@@ -49,18 +63,19 @@ where
         self.fee
     }
 
-    fn score(&self) -> Normalized {
-        [
-            score_success_rate(self.perf.success_rate),
-            score_latency(self.perf.latency_ms),
-            score_seconds_behind(self.seconds_behind),
-            score_slashable_grt(self.slashable_grt),
-        ]
-        .into_iter()
-        .product()
+    fn score(&self, w: &Weights) -> Normalized {
+        weighted_product(
+            [
+                score_success_rate(self.perf.success_rate, &w.success_rate),
+                score_latency(self.perf.latency_ms, &w.latency),
+                score_seconds_behind(self.seconds_behind, &w.seconds_behind),
+                score_slashable_grt(self.slashable_grt, &w.slashable_grt),
+            ],
+            &w.exponents,
+        )
     }
 
-    fn score_many<const LIMIT: usize>(candidates: &[&Self]) -> Normalized {
+    fn score_many<const LIMIT: usize>(candidates: &[&Self], w: &Weights) -> Normalized {
         let fee = candidates.iter().map(|c| c.fee.as_f64()).sum::<f64>();
         if Normalized::new(fee).is_none() {
             return Normalized::ZERO;
@@ -105,14 +120,37 @@ where
         let seconds_behind = candidates.iter().map(|c| c.seconds_behind).max().unwrap();
         let slashable_grt = candidates.iter().map(|c| c.slashable_grt).min().unwrap();
 
-        [
-            score_success_rate(success_rate),
-            score_latency(latency),
-            score_seconds_behind(seconds_behind),
-            score_slashable_grt(slashable_grt),
-        ]
-        .into_iter()
-        .product()
+        weighted_product(
+            [
+                score_success_rate(success_rate, &w.success_rate),
+                score_latency(latency, &w.latency),
+                score_seconds_behind(seconds_behind, &w.seconds_behind),
+                score_slashable_grt(slashable_grt, &w.slashable_grt),
+            ],
+            &w.exponents,
+        )
+    }
+}
+
+/// Combine per-curve scores into a single [`Normalized`] score, applying each configured exponent
+/// as `score_i.powf(exponent_i)`. When an exponent is exactly `1.0` the `powf` is skipped so that
+/// the default weights reproduce the previous plain-product behaviour bit-for-bit (and in the same
+/// left-fold order as `Iterator::product`). The result is clamped to `[0, 1]` to guard against
+/// exponents `< 0` producing values `> 1`.
+fn weighted_product(scores: [Normalized; 4], exponents: &[f64; 4]) -> Normalized {
+    let product = scores
+        .iter()
+        .zip(exponents)
+        .fold(1.0_f64, |acc, (s, &e)| acc * apply_exponent(s.as_f64(), e));
+    Normalized::clamp(product, 0.0, 1.0).unwrap()
+}
+
+#[inline]
+fn apply_exponent(score: f64, exponent: f64) -> f64 {
+    if exponent == 1.0 {
+        score
+    } else {
+        score.powf(exponent)
     }
 }
 
@@ -120,31 +158,27 @@ where
 // https://en.wikipedia.org/wiki/Logistic_function
 
 /// https://www.desmos.com/calculator/jdogbfxw2j
-fn score_seconds_behind(seconds_behind: u32) -> Normalized {
-    let b: f64 = 1e-16;
-    let l: f64 = 1.532;
-    let k: f64 = 0.021;
-    let x_0: i64 = 30;
-    let u = b + (l / (1.0 + E.powf(k * (seconds_behind as i64 - x_0) as f64)));
+fn score_seconds_behind(seconds_behind: u32, w: &SecondsBehindWeights) -> Normalized {
+    let u = w.offset
+        + (w.max / (1.0 + E.powf(w.steepness * (seconds_behind as i64 - w.midpoint_s) as f64)));
     Normalized::new(u).unwrap()
 }
 
 /// https://www.desmos.com/calculator/iqhjcdnphv
-fn score_slashable_grt(slashable_grt: u64) -> Normalized {
+fn score_slashable_grt(slashable_grt: u64, w: &SlashableGrtWeights) -> Normalized {
     let x = slashable_grt as f64;
     // Currently setting a minimum score of ~0.8 at the minimum stake requirement of 100,000 GRT.
-    let a = 1.6e-5;
-    Normalized::new(1.0 - E.powf(-a * x)).unwrap()
+    Normalized::new(1.0 - E.powf(-w.rate * x)).unwrap()
 }
 
 /// https://www.desmos.com/calculator/v2vrfktlpl
-pub fn score_latency(latency_ms: u16) -> Normalized {
-    let s = |x: u16| 1.0 + E.powf(((x as f64) - 400.0) / 300.0);
+pub fn score_latency(latency_ms: u16, w: &LatencyWeights) -> Normalized {
+    let s = |x: u16| 1.0 + E.powf(((x as f64) - w.midpoint_ms) / w.scale_ms);
     // Since high latency becomes bad success rate via timeouts, latency scores should have a floor.
-    Normalized::clamp(s(0) / s(latency_ms), 0.001, 1.0).unwrap()
+    Normalized::clamp(s(0) / s(latency_ms), w.floor, 1.0).unwrap()
 }
 
 /// https://www.desmos.com/calculator/df2keku3ad
-fn score_success_rate(success_rate: Normalized) -> Normalized {
-    Normalized::clamp(success_rate.as_f64().powi(7), 1e-8, 1.0).unwrap()
+fn score_success_rate(success_rate: Normalized, w: &SuccessRateWeights) -> Normalized {
+    Normalized::clamp(success_rate.as_f64().powi(w.exponent), w.floor, 1.0).unwrap()
 }
