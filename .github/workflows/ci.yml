@@ -14,6 +14,9 @@ env:
   GH_USER: ${{ github.repository_owner }}
   GH_TOKEN: ${{ secrets.GH_PRIVATE_TOKEN }}
 
+  # The commands CI runs live in yatr.toml, so `yatr ci` locally is the
+  # same gate. Bump deliberately.
+  YATR_VERSION: "1.1.0"
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -30,14 +33,30 @@ jobs:
       - name: Cache rust build files
         uses: Leafwing-Studios/cargo-cache@a0709d80dd96c8734ac8f186c1f238c8f528d198 # v2
 
+      - name: Cache yatr
+        id: cache-yatr
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/yatr
+          key: yatr-${{ runner.os }}-${{ env.YATR_VERSION }}
+
+      - name: Install yatr
+        if: steps.cache-yatr.outputs.cache-hit != 'true'
+        # RUSTFLAGS is cleared deliberately: yatr is a different crate and must
+        # not inherit this project's flags (a `-D warnings` or a custom linker
+        # would fail or mislink the install).
+        run: cargo install yatr --version ${{ env.YATR_VERSION }} --locked
+        env:
+          RUSTFLAGS: ""
+
       - name: check (release)
-        run: cargo check --workspace --all-targets --all-features --release
+        run: yatr typecheck
 
       - name: clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings --force-warn deprecated --force-warn dead-code
+        run: yatr lint
 
       - name: unit-tests
-        run: cargo test --all-features --lib
+        run: yatr test
 
   format:
     runs-on: ubuntu-latest
@@ -51,4 +70,20 @@ jobs:
           toolchain: nightly
           components: rustfmt
 
-      - run: cargo +nightly fmt --all -- --check
+      - name: Cache yatr
+        id: cache-yatr
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/yatr
+          key: yatr-${{ runner.os }}-${{ env.YATR_VERSION }}
+
+      - name: Install yatr
+        if: steps.cache-yatr.outputs.cache-hit != 'true'
+        # RUSTFLAGS is cleared deliberately: yatr is a different crate and must
+        # not inherit this project's flags (a `-D warnings` or a custom linker
+        # would fail or mislink the install).
+        run: cargo install yatr --version ${{ env.YATR_VERSION }} --locked
+        env:
+          RUSTFLAGS: ""
+
+      - run: yatr fmt-check
